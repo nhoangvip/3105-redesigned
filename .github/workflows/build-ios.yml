@@ -6,121 +6,319 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Build unsigned IPA
     runs-on: macos-latest
 
     steps:
-      - name: Checkout source
+      # ============================================================
+      # 1. Lấy source từ repository
+      # ============================================================
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # 2. Tìm và giải nén source ZIP
+      # ============================================================
       - name: Prepare source
         shell: bash
         run: |
           set -e
 
+          rm -rf source
           mkdir -p source
 
-          ZIP_FILE=$(find . -maxdepth 2 -type f \
-            \( -name "*.zip" -o -name "*.ZIP" \) | head -n 1)
+          ZIP_FILE=$(find . \
+            -type f \
+            \( -iname "*.zip" \) \
+            -not -path "./source/*" \
+            | head -n 1)
 
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Không tìm thấy file ZIP source."
-            exit 1
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Found ZIP:"
+            echo "$ZIP_FILE"
+
+            unzip -q "$ZIP_FILE" -d source
+          else
+            echo "Không tìm thấy ZIP."
+            echo "Kiểm tra source trực tiếp trong repository."
+
+            mkdir -p source
+
+            for item in *; do
+              if [ "$item" != "source" ] && [ "$item" != ".git" ]; then
+                cp -R "$item" source/ 2>/dev/null || true
+              fi
+            done
           fi
 
-          echo "Using source: $ZIP_FILE"
-          unzip -q "$ZIP_FILE" -d source
+          echo ""
+          echo "===== SOURCE ====="
+          find source -maxdepth 6 -type f | head -200
 
-          echo "Source files:"
-          find source -maxdepth 5 -type f | head -100
-
-      - name: Find Xcode project
+      # ============================================================
+      # 3. Tìm Xcode workspace/project
+      # ============================================================
+      - name: Detect Xcode project
         shell: bash
         run: |
           set -e
 
-          WORKSPACE=$(find source -name "*.xcworkspace" -type d | head -n 1)
-          PROJECT=$(find source -name "*.xcodeproj" -type d | head -n 1)
+          WORKSPACE=$(find source \
+            -type d \
+            -name "*.xcworkspace" \
+            | head -n 1)
+
+          PROJECT=$(find source \
+            -type d \
+            -name "*.xcodeproj" \
+            | head -n 1)
 
           if [ -n "$WORKSPACE" ]; then
-            echo "WORKSPACE=$WORKSPACE" >> "$GITHUB_ENV"
             echo "BUILD_TYPE=workspace" >> "$GITHUB_ENV"
-            echo "Found workspace: $WORKSPACE"
+            echo "WORKSPACE=$WORKSPACE" >> "$GITHUB_ENV"
+
+            echo "Found workspace:"
+            echo "$WORKSPACE"
+
           elif [ -n "$PROJECT" ]; then
-            echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
             echo "BUILD_TYPE=project" >> "$GITHUB_ENV"
-            echo "Found project: $PROJECT"
+            echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+            echo "Found project:"
+            echo "$PROJECT"
+
           else
-            echo "ERROR: Không tìm thấy .xcodeproj hoặc .xcworkspace."
+            echo ""
+            echo "ERROR: Không tìm thấy .xcworkspace hoặc .xcodeproj."
+            echo ""
+            echo "Các file Xcode tìm được:"
+            find source -maxdepth 8 \
+              \( -name "*.xcodeproj" -o -name "*.xcworkspace" \)
+
             exit 1
           fi
 
-      - name: Show schemes
+      # ============================================================
+      # 4. Hiển thị thông tin Xcode
+      # ============================================================
+      - name: Show Xcode information
         shell: bash
         run: |
-          set +e
+          xcodebuild -version
+
+          echo ""
+          echo "BUILD_TYPE=$BUILD_TYPE"
 
           if [ "$BUILD_TYPE" = "workspace" ]; then
-            xcodebuild -list -workspace "$WORKSPACE"
+            echo "WORKSPACE=$WORKSPACE"
           else
-            xcodebuild -list -project "$PROJECT"
+            echo "PROJECT=$PROJECT"
           fi
 
+      # ============================================================
+      # 5. Liệt kê scheme
+      # ============================================================
+      - name: Detect scheme
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== XCODE LIST ====="
+
+          if [ "$BUILD_TYPE" = "workspace" ]; then
+
+            xcodebuild \
+              -list \
+              -workspace "$WORKSPACE" \
+              | tee xcode-list.txt
+
+          else
+
+            xcodebuild \
+              -list \
+              -project "$PROJECT" \
+              | tee xcode-list.txt
+
+          fi
+
+          echo ""
+          echo "===== DETECTING SCHEME ====="
+
+          SCHEME=$(
+            awk '
+              /^[[:space:]]*Schemes:/ {
+                found=1
+                next
+              }
+
+              found && /^[[:space:]]*[^[:space:]]/ {
+                gsub(/^[[:space:]]+/, "", $0)
+                if ($0 != "") {
+                  print $1
+                  exit
+                }
+              }
+            ' xcode-list.txt
+          )
+
+          # Nếu không lấy được scheme từ xcodebuild -list,
+          # thử dùng tên project làm fallback.
+          if [ -z "$SCHEME" ] && [ -n "$PROJECT" ]; then
+            SCHEME=$(basename "$PROJECT" .xcodeproj)
+            echo "Fallback scheme: $SCHEME"
+          fi
+
+          if [ -z "$SCHEME" ]; then
+            echo ""
+            echo "ERROR: Không tìm thấy scheme."
+            echo ""
+            cat xcode-list.txt
+            exit 1
+          fi
+
+          echo ""
+          echo "Using scheme:"
+          echo "$SCHEME"
+
+          echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # 6. Kiểm tra scheme có build được không
+      # ============================================================
+      - name: Verify scheme
+        shell: bash
+        run: |
+          set -e
+
+          if [ "$BUILD_TYPE" = "workspace" ]; then
+
+            xcodebuild \
+              -workspace "$WORKSPACE" \
+              -scheme "$SCHEME" \
+              -showBuildSettings \
+              | head -100
+
+          else
+
+            xcodebuild \
+              -project "$PROJECT" \
+              -scheme "$SCHEME" \
+              -showBuildSettings \
+              | head -100
+
+          fi
+
+      # ============================================================
+      # 7. Build unsigned .app
+      # ============================================================
       - name: Build unsigned app
         shell: bash
         run: |
           set -e
 
           rm -rf build
+          mkdir -p build
+
+          echo "===== BUILD ====="
+          echo "Scheme: $SCHEME"
 
           if [ "$BUILD_TYPE" = "workspace" ]; then
+
             xcodebuild \
               -workspace "$WORKSPACE" \
-              -scheme "3105" \
+              -scheme "$SCHEME" \
               -configuration Release \
               -sdk iphoneos \
-              -derivedDataPath build \
+              -destination "generic/platform=iOS" \
+              -derivedDataPath "$PWD/build" \
               CODE_SIGNING_ALLOWED=NO \
               CODE_SIGNING_REQUIRED=NO \
               CODE_SIGN_IDENTITY=""
+
           else
+
             xcodebuild \
               -project "$PROJECT" \
+              -scheme "$SCHEME" \
               -configuration Release \
               -sdk iphoneos \
-              -derivedDataPath build \
+              -destination "generic/platform=iOS" \
+              -derivedDataPath "$PWD/build" \
               CODE_SIGNING_ALLOWED=NO \
               CODE_SIGNING_REQUIRED=NO \
               CODE_SIGN_IDENTITY=""
+
           fi
 
+      # ============================================================
+      # 8. Tìm file .app
+      # ============================================================
+      - name: Find built app
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== BUILD PRODUCTS ====="
+
+          find build/Build/Products \
+            -maxdepth 4 \
+            -type d \
+            -name "*.app" \
+            -print
+
+          APP=$(find build/Build/Products \
+            -type d \
+            -name "*.app" \
+            | head -n 1)
+
+          if [ -z "$APP" ]; then
+            echo ""
+            echo "ERROR: Không tìm thấy .app."
+            exit 1
+          fi
+
+          echo ""
+          echo "APP=$APP"
+
+          echo "APP_PATH=$APP" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # 9. Đóng gói IPA
+      # ============================================================
       - name: Package IPA
         shell: bash
         run: |
           set -e
 
-          APP=$(find build/Build/Products -type d -name "*.app" | head -n 1)
-
-          if [ -z "$APP" ]; then
-            echo "ERROR: Không tìm thấy file .app sau khi build."
-            exit 1
-          fi
-
-          echo "Found app: $APP"
-
           rm -rf Payload
+          rm -f 3105-unsigned.ipa
+
           mkdir -p Payload
 
-          cp -R "$APP" Payload/
+          cp -R "$APP_PATH" Payload/
 
-          zip -qry 3105-unsigned.ipa Payload
+          echo "===== PACKAGING ====="
 
+          zip -qry \
+            3105-unsigned.ipa \
+            Payload
+
+          echo ""
+          echo "IPA created:"
           ls -lh 3105-unsigned.ipa
 
-      - name: Upload unsigned IPA
+      # ============================================================
+      # 10. Upload IPA làm Artifact
+      # ============================================================
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: 3105-iOS-unsigned
           path: 3105-unsigned.ipa
           if-no-files-found: error
+          retention-days: 7

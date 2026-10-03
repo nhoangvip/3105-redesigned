@@ -1,0 +1,126 @@
+name: Build iOS IPA Unsigned
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p source
+
+          ZIP_FILE=$(find . -maxdepth 2 -type f \
+            \( -name "*.zip" -o -name "*.ZIP" \) | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: Không tìm thấy file ZIP source."
+            exit 1
+          fi
+
+          echo "Using source: $ZIP_FILE"
+          unzip -q "$ZIP_FILE" -d source
+
+          echo "Source files:"
+          find source -maxdepth 5 -type f | head -100
+
+      - name: Find Xcode project
+        shell: bash
+        run: |
+          set -e
+
+          WORKSPACE=$(find source -name "*.xcworkspace" -type d | head -n 1)
+          PROJECT=$(find source -name "*.xcodeproj" -type d | head -n 1)
+
+          if [ -n "$WORKSPACE" ]; then
+            echo "WORKSPACE=$WORKSPACE" >> "$GITHUB_ENV"
+            echo "BUILD_TYPE=workspace" >> "$GITHUB_ENV"
+            echo "Found workspace: $WORKSPACE"
+          elif [ -n "$PROJECT" ]; then
+            echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+            echo "BUILD_TYPE=project" >> "$GITHUB_ENV"
+            echo "Found project: $PROJECT"
+          else
+            echo "ERROR: Không tìm thấy .xcodeproj hoặc .xcworkspace."
+            exit 1
+          fi
+
+      - name: Show schemes
+        shell: bash
+        run: |
+          set +e
+
+          if [ "$BUILD_TYPE" = "workspace" ]; then
+            xcodebuild -list -workspace "$WORKSPACE"
+          else
+            xcodebuild -list -project "$PROJECT"
+          fi
+
+      - name: Build unsigned app
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf build
+
+          if [ "$BUILD_TYPE" = "workspace" ]; then
+            xcodebuild \
+              -workspace "$WORKSPACE" \
+              -scheme "3105" \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY=""
+          else
+            xcodebuild \
+              -project "$PROJECT" \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY=""
+          fi
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -e
+
+          APP=$(find build/Build/Products -type d -name "*.app" | head -n 1)
+
+          if [ -z "$APP" ]; then
+            echo "ERROR: Không tìm thấy file .app sau khi build."
+            exit 1
+          fi
+
+          echo "Found app: $APP"
+
+          rm -rf Payload
+          mkdir -p Payload
+
+          cp -R "$APP" Payload/
+
+          zip -qry 3105-unsigned.ipa Payload
+
+          ls -lh 3105-unsigned.ipa
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3105-iOS-unsigned
+          path: 3105-unsigned.ipa
+          if-no-files-found: error

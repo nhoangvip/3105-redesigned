@@ -12,12 +12,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Compile iOS ARM64 Binary (3105)
+      - name: Compile iOS ARM64 Binary
         run: |
           mkdir -p Payload/3105.app
-          xcrun -sdk iphoneos swiftc ViewController.swift \
-            -target arm64-apple-ios15.0 \
-            -o Payload/3105.app/3105
+          swiftc ViewController.swift -target arm64-apple-ios15.0 -o Payload/3105.app/3105
 
       - name: Create Info.plist
         run: |
@@ -40,25 +38,15 @@ jobs:
               <string>1</string>
               <key>LSRequiresIPhoneOS</key>
               <true/>
-              <key>UIRequiredDeviceCapabilities</key>
-              <array>
-                  <string>arm64</string>
-              </array>
-              <key>UISupportedInterfaceOrientations</key>
-              <array>
-                  <string>UIInterfaceOrientationPortrait</string>
-              </array>
           </dict>
           </plist>
           EOF
 
-      - name: Fake Sign & Package IPA
+      - name: Package IPA
         run: |
-          brew install ldid
-          ldid -S Payload/3105.app/3105
           zip -r9 3105_Cyberpunk_ProMax.ipa Payload
 
-      - name: Upload 3105 Cyberpunk IPA
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: 3105_Cyberpunk_ProMax_IPA
